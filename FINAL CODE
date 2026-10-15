@@ -1,0 +1,663 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+#define OLED_SDA 21
+#define OLED_SCL 22
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+
+#define FLAP_BUTTON 25
+#define RESTART_BUTTON 27
+#define LED_PIN 26
+
+
+const char* WIFI_NAME = "FLAPPY_ESP32";
+const char* WIFI_PASSWORD = "12345678";
+
+WebServer server(80);
+
+
+const int BIRD_X = 25;
+const int BIRD_SIZE = 3;
+
+const float GRAVITY = 0.15;
+const float FLAP_POWER = -3.2;
+
+const int PIPE_WIDTH = 10;
+const int GAP_HEIGHT = 32;
+
+const int PIPE_SPEED = 1;
+
+const int FRAME_DELAY = 45;
+
+
+float birdY = 32;
+float velocity = 0;
+
+int pipeX = 128;
+int gapY = 15;
+
+int score = 0;
+
+bool gameOver = false;
+
+
+unsigned long lastFrame = 0;
+unsigned long lastFlap = 0;
+unsigned long lastRestart = 0;
+unsigned long lastLEDBlink = 0;
+
+
+bool phoneFlap = false;
+bool phoneRestart = false;
+
+
+void startGame() {
+
+  birdY = 32;
+  velocity = 0;
+
+  pipeX = SCREEN_WIDTH + 20;
+
+  gapY = random(7, 25);
+
+  score = 0;
+
+  gameOver = false;
+
+  digitalWrite(LED_PIN, HIGH);
+
+  display.clearDisplay();
+  display.display();
+
+  Serial.println("GAME STARTED");
+}
+
+
+void flap() {
+
+  velocity = FLAP_POWER;
+
+  // Small LED flash
+  digitalWrite(LED_PIN, LOW);
+  delay(15);
+  digitalWrite(LED_PIN, HIGH);
+}
+
+void drawBird() {
+
+  display.fillCircle(
+    BIRD_X,
+    (int)birdY,
+    BIRD_SIZE,
+    SSD1306_WHITE
+  );
+
+  // Eye
+  display.drawPixel(
+    BIRD_X + 1,
+    (int)birdY - 1,
+    SSD1306_BLACK
+  );
+}
+
+void drawPipes() {
+
+  int bottomPipe = gapY + GAP_HEIGHT;
+
+  // Top pipe
+  display.fillRect(
+    pipeX,
+    0,
+    PIPE_WIDTH,
+    gapY,
+    SSD1306_WHITE
+  );
+
+  // Bottom pipe
+  display.fillRect(
+    pipeX,
+    bottomPipe,
+    PIPE_WIDTH,
+    SCREEN_HEIGHT - bottomPipe,
+    SSD1306_WHITE
+  );
+}
+
+
+bool checkCollision() {
+
+  // Ceiling
+  if (birdY <= 2) {
+    return true;
+  }
+
+  // Ground
+  if (birdY >= SCREEN_HEIGHT - 2) {
+    return true;
+  }
+
+  // Pipe collision
+  if (
+    BIRD_X + 2 >= pipeX &&
+    BIRD_X - 2 <= pipeX + PIPE_WIDTH
+  ) {
+
+    if (
+      birdY <= gapY ||
+      birdY >= gapY + GAP_HEIGHT
+    ) {
+
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+void showGameOver() {
+
+  digitalWrite(LED_PIN, LOW);
+
+  display.clearDisplay();
+
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(2);
+
+  display.setCursor(15, 8);
+  display.println("GAME");
+
+  display.setCursor(15, 28);
+  display.println("OVER");
+
+  display.setTextSize(1);
+
+  display.setCursor(42, 48);
+  display.print("SCORE ");
+  display.println(score);
+
+  display.setCursor(22, 57);
+  display.print("SW2 RESTART");
+
+  display.display();
+
+  Serial.print("GAME OVER - SCORE: ");
+  Serial.println(score);
+}
+
+void handleHome() {
+
+  String page = R"rawliteral(
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>Flappy ESP32</title>
+
+<style>
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 20px;
+  background: #101820;
+  color: white;
+  font-family: Arial, sans-serif;
+  text-align: center;
+}
+
+h1 {
+  font-size: 30px;
+  margin: 10px 0;
+}
+
+#score {
+  font-size: 24px;
+  margin: 20px;
+}
+
+button {
+  display: block;
+  width: 90%;
+  max-width: 350px;
+  height: 100px;
+  margin: 15px auto;
+  border: none;
+  border-radius: 20px;
+  color: white;
+  font-size: 28px;
+  font-weight: bold;
+  touch-action: manipulation;
+}
+
+#flap {
+  background: #1687ff;
+}
+
+#restart {
+  background: #555555;
+  height: 70px;
+  font-size: 22px;
+}
+
+button:active {
+  transform: scale(0.96);
+}
+
+.info {
+  margin-top: 25px;
+  color: #aaaaaa;
+  font-size: 14px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>FLAPPY BIRD</h1>
+
+<div id="score">
+SCORE: 0
+</div>
+
+<button id="flap">
+FLAP
+</button>
+
+<button id="restart">
+RESTART
+</button>
+
+<div class="info">
+ESP32 OLED GAME CONTROLLER
+</div>
+
+<script>
+
+const flapButton =
+document.getElementById("flap");
+
+const restartButton =
+document.getElementById("restart");
+
+flapButton.addEventListener(
+  "pointerdown",
+  function(event) {
+
+    event.preventDefault();
+
+    fetch("/flap").catch(function(){});
+
+  }
+);
+
+restartButton.addEventListener(
+  "pointerdown",
+  function(event) {
+
+    event.preventDefault();
+
+    fetch("/restart").catch(function(){});
+
+  }
+);
+
+setInterval(function() {
+
+  fetch("/score")
+  .then(function(response) {
+    return response.text();
+  })
+  .then(function(data) {
+
+    document.getElementById("score")
+      .innerHTML = "SCORE: " + data;
+
+  })
+  .catch(function(){});
+
+}, 500);
+
+</script>
+
+</body>
+
+</html>
+
+)rawliteral";
+
+  server.send(
+    200,
+    "text/html",
+    page
+  );
+}
+
+void handlePhoneFlap() {
+
+  phoneFlap = true;
+
+  server.send(
+    200,
+    "text/plain",
+    "FLAP"
+  );
+}
+
+
+void handlePhoneRestart() {
+
+  phoneRestart = true;
+
+  server.send(
+    200,
+    "text/plain",
+    "RESTART"
+  );
+}
+
+
+void handleScore() {
+
+  server.send(
+    200,
+    "text/plain",
+    String(score)
+  );
+}
+
+void setup() {
+
+  Serial.begin(115200);
+
+
+  pinMode(
+    FLAP_BUTTON,
+    INPUT_PULLUP
+  );
+
+  pinMode(
+    RESTART_BUTTON,
+    INPUT_PULLUP
+  );
+
+ 
+  pinMode(
+    LED_PIN,
+    OUTPUT
+  );
+
+  digitalWrite(
+    LED_PIN,
+    LOW
+  );
+
+
+  Wire.begin(
+    OLED_SDA,
+    OLED_SCL
+  );
+
+  if (
+    !display.begin(
+      SSD1306_SWITCHCAPVCC,
+      0x3C
+    )
+  ) {
+
+    Serial.println("OLED NOT FOUND");
+
+    while (true) {
+      delay(100);
+    }
+  }
+
+  display.clearDisplay();
+
+  display.setTextColor(
+    SSD1306_WHITE
+  );
+
+  randomSeed(
+    analogRead(34)
+  );
+
+
+  WiFi.mode(WIFI_AP);
+
+  WiFi.softAP(
+    WIFI_NAME,
+    WIFI_PASSWORD
+  );
+
+  Serial.println();
+  Serial.println("======================");
+  Serial.println("FLAPPY ESP32");
+  Serial.println("======================");
+
+  Serial.print("WiFi: ");
+  Serial.println(WIFI_NAME);
+
+  Serial.print("Password: ");
+  Serial.println(WIFI_PASSWORD);
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+
+  Serial.println("======================");
+
+  server.on(
+    "/",
+    handleHome
+  );
+
+  server.on(
+    "/flap",
+    handlePhoneFlap
+  );
+
+  server.on(
+    "/restart",
+    handlePhoneRestart
+  );
+
+  server.on(
+    "/score",
+    handleScore
+  );
+
+  server.begin();
+
+  Serial.println(
+    "Web server started"
+  );
+
+  
+  startGame();
+}
+
+
+void loop() {
+
+  server.handleClient();
+
+
+  if (phoneRestart) {
+
+    phoneRestart = false;
+
+    startGame();
+  }
+
+
+  if (phoneFlap) {
+
+    phoneFlap = false;
+
+    if (!gameOver) {
+
+      flap();
+    }
+  }
+
+
+  if (
+    digitalRead(
+      RESTART_BUTTON
+    ) == LOW
+  ) {
+
+    if (
+      millis() - lastRestart > 250
+    ) {
+
+      lastRestart = millis();
+
+      startGame();
+
+      while (
+        digitalRead(
+          RESTART_BUTTON
+        ) == LOW
+      ) {
+
+        delay(1);
+      }
+    }
+  }
+
+  if (
+    !gameOver &&
+    digitalRead(
+      FLAP_BUTTON
+    ) == LOW
+  ) {
+
+    if (
+      millis() - lastFlap > 150
+    ) {
+
+      lastFlap = millis();
+
+      flap();
+
+      while (
+        digitalRead(
+          FLAP_BUTTON
+        ) == LOW
+      ) {
+
+        delay(1);
+      }
+    }
+  }
+
+  if (
+    !gameOver &&
+    millis() - lastFrame >= FRAME_DELAY
+  ) {
+
+    lastFrame = millis();
+
+    // Gravity
+    velocity += GRAVITY;
+
+    birdY += velocity;
+
+    // Move pipe
+    pipeX -= PIPE_SPEED;
+
+
+    if (
+      pipeX + PIPE_WIDTH < 0
+    ) {
+
+      pipeX = SCREEN_WIDTH + 5;
+
+      gapY = random(
+        7,
+        25
+      );
+
+      score++;
+
+      Serial.print("Score: ");
+      Serial.println(score);
+    }
+
+    if (checkCollision()) {
+
+      gameOver = true;
+
+      showGameOver();
+
+      return;
+    }
+
+    display.clearDisplay();
+
+    drawPipes();
+
+    drawBird();
+
+    // Score
+    display.setTextSize(1);
+
+    display.setCursor(
+      2,
+      2
+    );
+
+    display.print(
+      "SCORE: "
+    );
+
+    display.print(
+      score
+    );
+
+    display.display();
+  }
+
+  
+  if (gameOver) {
+
+    if (
+      millis() - lastLEDBlink >= 400
+    ) {
+
+      lastLEDBlink = millis();
+
+      digitalWrite(
+        LED_PIN,
+        !digitalRead(LED_PIN)
+      );
+    }
+  }
+}
